@@ -47,7 +47,14 @@ async def get_jwks(force_refresh=False):
     if force_refresh or "keys" not in cache or now > cache.get("expire", 0):
         async with httpx.AsyncClient() as client:
             resp = await client.get(JWKS_URL)
-            keys = resp.json()["keys"]
+            jwks_data = resp.json()
+            # Supabase pode retornar diferentes formatos
+            if "keys" in jwks_data:
+                keys = jwks_data["keys"]
+            elif isinstance(jwks_data, list):
+                keys = jwks_data
+            else:
+                keys = [jwks_data]
             cache = {"keys": keys, "expire": now + 86400}
             await safe_file_op(JWKS_FILE, "write", cache)
     return cache["keys"]
