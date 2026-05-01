@@ -179,14 +179,14 @@ async def health():
 async def wake():
     return {"status": "acordado"}
 
-@app.get("/stream")
-async def stream(
-    request: Request,
+@app.get("/resolve")
+async def resolve(
     video_id: str = Query(...),
     token: str = Query(...),
     title: str = Query(""),
     artist: str = Query("")
 ):
+    """Retorna a URL direta do stream em JSON — o app Flutter toca diretamente."""
     user_id = await verify_jwt(token)
     await check_rate(user_id)
 
@@ -206,13 +206,51 @@ async def stream(
         if not stream_url:
             raise HTTPException(status_code=404, detail="Musica nao disponivel")
 
-    # Resolve URL final
+    # Resolve URL final (segue redirects do YouTube)
     final_url = await resolve_final_url(stream_url)
 
-    # Redireciona para URL direta (evita proxy no Render free tier)
-    # O ExoPlayer toca diretamente do CDN do YouTube
-    from fastapi.responses import RedirectResponse
-    return RedirectResponse(url=final_url, status_code=302)
+    return {"url": final_url, "source": "youtube" if "googlevideo" in final_url else "deezer"}
+
+@app.get("/stream")
+async def stream(
+    request: Request,
+    video_id: str = Query(...),
+    token: str = Query(...),
+    title: str = Query(""),
+    artist: str = Query("")
+):
+    """Proxy de stream — fallback caso URL direta nao funcione."""
+    user_id = await verify_jwt(token)
+
+    stream_url = await get_cached_url(video_id)
+    if not stream_url:
+        stream_url, _, _ = await extract_url(video_id)
+        if stream_url:
+            await set_cached_url(video_id, stream_url)
+
+    if not stream_url:
+        query = clean_title(f"{title} {artist}") if title else video_id
+        stream_url = await get_deezer_preview(query)
+
+    if not stream_url:
+        raise HTTPException(status_code=404, detail="Musica nao disponivel")
+
+    final_url = await resolve_final_url(stream_url)
+
+    range_header = request.headers.get("range")
+    headers = {"User-Agent": "Mozilla/5.0"}
+    if range_header:
+        headers["Range"] = range_header
+
+    async def generate():
+        async with httpx.AsyncClient() as client:
+            async with client.stream("GET", final_url, headers=headers) as r:
+                async for chunk in r.aiter_bytes(chunk_size=131072):
+                    yield chunk
+
+    response_headers = {"Accept-Ranges": "bytes"}
+    status_code = 206 if range_header else 200
+    return StreamingResponse(generate(), status_code=status_code, media_type="audio/mp4", headers=response_headers)
 
 @app.post("/prefetch")
 async def prefetch(
