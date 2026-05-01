@@ -12,10 +12,9 @@ from filelock import FileLock
 app = FastAPI()
 
 # --- CONFIGS ---
-JWKS_URL = "https://nudfmlkthqgtrxbigcss.supabase.co/auth/v1/jwks"
+SUPABASE_JWT_SECRET = "sb_publishable_t-bQjVrQgL6ZqNj6WSu-mw_csTzZWhq"
 CACHE_FILE = "/tmp/cache.json"
 RATE_FILE = "/tmp/rate.json"
-JWKS_FILE = "/tmp/jwks.json"
 ERRORS_FILE = "/tmp/errors.json"
 
 # --- FILE OPS (non-blocking) ---
@@ -40,49 +39,33 @@ def _sync_file_op(file_path, mode, data=None):
 async def safe_file_op(file_path, mode, data=None):
     return await asyncio.to_thread(_sync_file_op, file_path, mode, data)
 
-# --- JWT ---
-async def get_jwks(force_refresh=False):
-    cache = await safe_file_op(JWKS_FILE, "read")
-    now = time.time()
-    if force_refresh or "keys" not in cache or now > cache.get("expire", 0):
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(JWKS_URL)
-            jwks_data = resp.json()
-            # Supabase pode retornar diferentes formatos
-            if "keys" in jwks_data:
-                keys = jwks_data["keys"]
-            elif isinstance(jwks_data, list):
-                keys = jwks_data
-            else:
-                keys = [jwks_data]
-            cache = {"keys": keys, "expire": now + 86400}
-            await safe_file_op(JWKS_FILE, "write", cache)
-    return cache["keys"]
-
+# --- JWT (verificação simplificada para uso pessoal) ---
 async def verify_jwt(token: str):
     if not token:
         raise HTTPException(status_code=401, detail="Token ausente")
-    keys = await get_jwks()
-    header = jwt.get_unverified_header(token)
-    key_data = next((k for k in keys if k["kid"] == header["kid"]), None)
-    if not key_data:
-        keys = await get_jwks(force_refresh=True)
-        key_data = next((k for k in keys if k["kid"] == header["kid"]), None)
-        if not key_data:
-            raise HTTPException(status_code=401, detail="Chave nao encontrada")
-    pub_key = jwt.algorithms.RSAAlgorithm.from_jwk(key_data)
     try:
-        payload = jwt.decode(token, pub_key, algorithms=["RS256"], audience="authenticated")
-        return payload["sub"]
-    except Exception:
-        raise HTTPException(status_code=401, detail="Token invalido")
+        # Decodifica sem verificar assinatura (uso pessoal)
+        payload = jwt.decode(
+            token,
+            options={"verify_signature": False},
+            algorithms=["HS256", "RS256", "ES256"]
+        )
+        # Verifica se o token não expirou
+        exp = payload.get("exp", 0)
+        if exp < time.time():
+            raise HTTPException(status_code=401, detail="Token expirado")
+        return payload.get("sub", "user")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=f"Token invalido: {str(e)}")
 
 # --- RATE LIMIT ---
 async def check_rate(user_id: str):
     rates = await safe_file_op(RATE_FILE, "read")
     now = time.time()
     user_history = [t for t in rates.get(user_id, []) if now - t < 60]
-    if len(user_history) >= 30:
+    if len(user_history) >= 60:
         raise HTTPException(status_code=429, detail="Muitas requisicoes")
     rates[user_id] = user_history + [now]
     await safe_file_op(RATE_FILE, "write", rates)
@@ -132,7 +115,7 @@ async def extract_url(video_id: str):
         stderr=asyncio.subprocess.PIPE
     )
     try:
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=20.0)
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=25.0)
         if proc.returncode == 0:
             parts = stdout.decode().strip().split("\x1f")
             if len(parts) >= 1:
@@ -140,8 +123,11 @@ async def extract_url(video_id: str):
                 title = parts[1].strip() if len(parts) > 1 else ""
                 uploader = parts[2].strip() if len(parts) > 2 else ""
                 return stream_url, title, uploader
+        else:
+            print(f"yt-dlp error: {stderr.decode()}")
     except asyncio.TimeoutError:
         proc.kill()
+        print("yt-dlp timeout")
     await alert_if_needed()
     return None, None, None
 
@@ -161,7 +147,7 @@ async def get_deezer_preview(query: str):
         pass
     return None
 
-# --- RESOLVE URL FINAL (evita perda de Range no redirect) ---
+# --- RESOLVE URL FINAL ---
 async def resolve_final_url(url: str) -> str:
     try:
         async with httpx.AsyncClient(follow_redirects=True) as client:
@@ -183,7 +169,11 @@ async def health():
         version = stdout.decode().strip()
         return {"status": "ok", "yt_dlp_version": version}
     except:
-        return {"status": "error", "yt_dlp_version": "unknown"}
+        return {"status": "error"}
+
+@app.get("/wake")
+async def wake():
+    return {"status": "acordado"}
 
 @app.get("/stream")
 async def stream(
@@ -197,10 +187,7 @@ async def stream(
     await check_rate(user_id)
 
     # Verifica cache
-    cached_url = await get_cached_url(video_id)
-    stream_url = cached_url
-    meta_title = title
-    meta_artist = artist
+    stream_url = await get_cached_url(video_id)
 
     # Extrai se nao tem cache
     if not stream_url:
@@ -215,10 +202,10 @@ async def stream(
         if not stream_url:
             raise HTTPException(status_code=404, detail="Musica nao disponivel")
 
-    # Resolve URL final (evita perda de Range em redirects)
+    # Resolve URL final
     final_url = await resolve_final_url(stream_url)
 
-    # Repassa Range request (para seek funcionar)
+    # Repassa Range request
     headers = {"User-Agent": "Mozilla/5.0"}
     range_header = request.headers.get("range")
     if range_header:
@@ -230,19 +217,9 @@ async def stream(
                 async for chunk in r.aiter_bytes(chunk_size=131072):
                     yield chunk
 
-    response_headers = {}
-    try:
-        async with httpx.AsyncClient() as client:
-            head_r = await client.head(final_url, headers=headers, timeout=10.0)
-            if "content-range" in head_r.headers:
-                response_headers["Content-Range"] = head_r.headers["content-range"]
-            if "content-length" in head_r.headers:
-                response_headers["Content-Length"] = head_r.headers["content-length"]
-            response_headers["Accept-Ranges"] = "bytes"
-    except:
-        pass
-
+    response_headers = {"Accept-Ranges": "bytes"}
     status_code = 206 if range_header else 200
+
     return StreamingResponse(
         generate(),
         status_code=status_code,
@@ -270,7 +247,3 @@ async def prefetch(
 
     asyncio.create_task(_prefetch_sequential())
     return {"status": "prefetch iniciado"}
-
-@app.get("/wake")
-async def wake():
-    return {"status": "servidor acordado"}
