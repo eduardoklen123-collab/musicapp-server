@@ -209,27 +209,10 @@ async def stream(
     # Resolve URL final
     final_url = await resolve_final_url(stream_url)
 
-    # Repassa Range request
-    headers = {"User-Agent": "Mozilla/5.0"}
-    range_header = request.headers.get("range")
-    if range_header:
-        headers["Range"] = range_header
-
-    async def generate():
-        async with httpx.AsyncClient() as client:
-            async with client.stream("GET", final_url, headers=headers) as r:
-                async for chunk in r.aiter_bytes(chunk_size=131072):
-                    yield chunk
-
-    response_headers = {"Accept-Ranges": "bytes"}
-    status_code = 206 if range_header else 200
-
-    return StreamingResponse(
-        generate(),
-        status_code=status_code,
-        media_type="audio/mp4",
-        headers=response_headers
-    )
+    # Redireciona para URL direta (evita proxy no Render free tier)
+    # O ExoPlayer toca diretamente do CDN do YouTube
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url=final_url, status_code=302)
 
 @app.post("/prefetch")
 async def prefetch(
