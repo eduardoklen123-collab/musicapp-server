@@ -101,14 +101,18 @@ def clean_title(title: str) -> str:
 # --- YTDLP ---
 async def extract_url(video_id: str):
     url = f"https://www.youtube.com/watch?v={video_id}"
+    # Usa cookies.txt se existir (evita bloqueio de bot do YouTube)
+    cookies_path = "/opt/render/project/src/cookies.txt"
     cmd = [
         "yt-dlp",
         "--no-warnings",
         "--print", "%(url)s\x1f%(title)s\x1f%(uploader)s",
         "-f", "ba[ext=m4a]/ba[ext=mp4]/ba",
         "--no-playlist",
-        url
     ]
+    if os.path.exists(cookies_path):
+        cmd += ["--cookies", cookies_path]
+    cmd.append(url)
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
