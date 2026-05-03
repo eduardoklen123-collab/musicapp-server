@@ -122,7 +122,6 @@ async def extract_url(video_id: str):
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=40.0)
         if proc.returncode == 0:
             lines = stdout.decode().strip().split("\n")
-            # -g retorna uma URL por linha — pega a primeira
             stream_url = lines[0].strip() if lines else ""
             if stream_url.startswith("http"):
                 return stream_url, "", ""
