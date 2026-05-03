@@ -119,7 +119,7 @@ async def extract_url(video_id: str):
         stderr=asyncio.subprocess.PIPE
     )
     try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=25.0)
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=40.0)
         if proc.returncode == 0:
             parts = stdout.decode().strip().split("\x1f")
             if len(parts) >= 1:
