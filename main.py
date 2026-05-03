@@ -121,12 +121,11 @@ async def extract_url(video_id: str):
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=40.0)
         if proc.returncode == 0:
-            parts = stdout.decode().strip().split("\x1f")
-            if len(parts) >= 1:
-                stream_url = parts[0].strip()
-                title = parts[1].strip() if len(parts) > 1 else ""
-                uploader = parts[2].strip() if len(parts) > 2 else ""
-                return stream_url, title, uploader
+            lines = stdout.decode().strip().split("\n")
+            # -g retorna uma URL por linha — pega a primeira
+            stream_url = lines[0].strip() if lines else ""
+            if stream_url.startswith("http"):
+                return stream_url, "", ""
         else:
             print(f"yt-dlp error: {stderr.decode()}")
     except asyncio.TimeoutError:
